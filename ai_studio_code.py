@@ -36,7 +36,6 @@ def init_db():
 
 init_db()
 
-# --- FUNZIONE RECUPERO INFO DA ISBN (Google Books API) ---
 # --- FUNZIONE RECUPERO INFO DA ISBN (OpenLibrary + Google Books) ---
 def get_book_by_isbn(isbn):
     # Pulisce l'ISBN da trattini, spazi o caratteri strani
