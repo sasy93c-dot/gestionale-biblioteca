@@ -40,6 +40,7 @@ def _google(q, isbn):
     if "GOOGLE_BOOKS_KEY" in st.secrets:
         p["key"] = st.secrets["GOOGLE_BOOKS_KEY"]
     items = _get("https://www.googleapis.com/books/v1/volumes", p).get("items") or []
+    scelto = None
     for it in items:
         ids = [x.get("identifier", "") for x in it["volumeInfo"].get("industryIdentifiers", [])]
         if isbn in ids:
@@ -53,7 +54,6 @@ def _google(q, isbn):
     cover = (v.get("imageLinks") or {}).get("thumbnail", "").replace("http://", "https://").replace("&edge=curl", "")
     return {"titolo": v.get("title", ""), "autore": ", ".join(v.get("authors", [])),
             "editore": v.get("publisher", ""), "copertina": cover}
-
 def google_isbn(isbn):
     return _google(f"isbn:{isbn}", isbn)
 
