@@ -1,4 +1,6 @@
 import re
+import io
+import base64
 import requests
 import sqlite3
 import pandas as pd
@@ -19,46 +21,107 @@ def isbn10_a_13(i):
     ctrl = (10 - sum(int(c) * (1 if n % 2 == 0 else 3) for n, c in enumerate(base)) % 10) % 10
     return base + str(ctrl)
 
-def cerca_google(isbn):
-    # Aggiungi 'country': 'IT' (o un altro paese) per evitare errori di localizzazione
-    p = {"q": f"isbn:{isbn}", "country": "IT"}
+HEADERS = {"User-Agent": "GestionaleBiblioteca/1.0 (streamlit)"}
+
+def _get(url, params=None):
+    r = requests.get(url, params=params, headers=HEADERS, timeout=12)
+    r.raise_for_status()
+    return r.json()
+
+def cover_valida(url):
+    try:
+        r = requests.head(url, headers=HEADERS, timeout=8, allow_redirects=True)
+        return r.ok and "image" in r.headers.get("content-type", "")
+    except Exception:
+        return False
+
+def _google(q, isbn):
+    p = {"q": q, "maxResults": 5, "country": "IT"}
     if "GOOGLE_BOOKS_KEY" in st.secrets:
         p["key"] = st.secrets["GOOGLE_BOOKS_KEY"]
-    r = requests.get("https://www.googleapis.com/books/v1/volumes", params=p, timeout=10)
-    items = r.json().get("items") if r.ok else None
-    if not items: 
+    items = _get("https://www.googleapis.com/books/v1/volumes", p).get("items") or []
+    scelto = None
+    for it in items:
+        ids = [x.get("identifier", "") for x in it["volumeInfo"].get("industryIdentifiers", [])]
+        if isbn in ids:
+            scelto = it
+            break
+    if not scelto and items and q.startswith("isbn:"):
+        scelto = items[0]
+    if not scelto:
         return None
-    # ... il resto del codice rimane invariato
-def cerca_openlibrary(isbn):
-    r = requests.get("https://openlibrary.org/api/books",
-        params={"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"}, timeout=10)
-    d = r.json().get(f"ISBN:{isbn}") if r.ok else None
-    if not d: 
-        return None
-    return {
-        "titolo": d.get("title", ""),
-        "autore": ", ".join(a["name"] for a in d.get("authors", [])),
-        "editore": ", ".join(p["name"] for p in d.get("publishers", [])),
-        "copertina": (d.get("cover") or {}).get("medium", "")
-    }
+    v = scelto["volumeInfo"]
+    cover = (v.get("imageLinks") or {}).get("thumbnail", "").replace("http://", "https://").replace("&edge=curl", "")
+    return {"titolo": v.get("title", ""), "autore": ", ".join(v.get("authors", [])),
+            "editore": v.get("publisher", ""), "copertina": cover}
 
-@st.cache_data(ttl=86400)
+def google_isbn(isbn):
+    return _google(f"isbn:{isbn}", isbn)
+
+def google_testo(isbn):
+    return _google(isbn, isbn)
+
+def openlibrary(isbn):
+    d = _get("https://openlibrary.org/api/books",
+             {"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"}).get(f"ISBN:{isbn}")
+    if not d:
+        return None
+    return {"titolo": d.get("title", ""),
+            "autore": ", ".join(a["name"] for a in d.get("authors", [])),
+            "editore": ", ".join(p["name"] for p in d.get("publishers", [])),
+            "copertina": (d.get("cover") or {}).get("medium", "")}
+
+FONTI = (google_isbn, google_testo, openlibrary)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _cerca_online(isbn):
+    # Se non trova nulla solleva un errore: cosi' l'esito negativo NON viene messo in cache.
+    errori = []
+    for fonte in FONTI:
+        try:
+            ris = fonte(isbn)
+            if ris and ris["titolo"]:
+                if not ris["copertina"]:
+                    alt = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false"
+                    ris["copertina"] = alt if cover_valida(alt) else ""
+                return ris
+            errori.append(f"{fonte.__name__}: nessun risultato")
+        except Exception as e:
+            errori.append(f"{fonte.__name__}: {e}")
+    raise LookupError(" | ".join(errori))
+
 def cerca_libro(isbn_grezzo):
+    """Ritorna (dati, motivo_errore)."""
     isbn = pulisci_isbn(isbn_grezzo)
     if not isbn:
-        return None
+        return None, "ISBN vuoto"
+    motivo = ""
     for codice in dict.fromkeys([isbn, isbn10_a_13(isbn)]):
-        for fonte in (cerca_google, cerca_openlibrary):
-            try:
-                ris = fonte(codice)
-                if ris and ris["titolo"]:
-                    if not ris["copertina"]:
-                        ris["copertina"] = f"https://covers.openlibrary.org/b/isbn/{codice}-M.jpg?default=false"
-                    ris["isbn"] = codice
-                    return ris
-            except Exception:
-                continue
-    return None
+        try:
+            ris = dict(_cerca_online(codice))
+            ris["isbn"] = codice
+            return ris, ""
+        except LookupError as e:
+            motivo = str(e)
+    return None, motivo
+
+# --- COPERTINE ---
+def immagine_a_data_uri(file):
+    from PIL import Image
+    img = Image.open(file).convert("RGB")
+    img.thumbnail((400, 600))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+def mostra_cover(src, **kw):
+    try:
+        if src.startswith("data:image"):
+            st.image(base64.b64decode(src.split(",", 1)[1]), **kw)
+        else:
+            st.image(src, **kw)
+    except Exception:
+        st.caption("Copertina non disponibile")
 
 # --- INIZIALIZZAZIONE DATABASE ---
 def init_db():
@@ -120,6 +183,12 @@ menu = st.sidebar.radio("Sezioni:", [
     "📊 Storico Prestiti"
 ])
 
+try:
+    with open("biblioteca.db", "rb") as f:
+        st.sidebar.download_button("💾 Scarica backup database", f.read(), "biblioteca.db")
+except Exception:
+    pass
+
 conn = get_connection()
 c = conn.cursor()
 
@@ -140,7 +209,7 @@ if menu == "📖 Catalogo Libri (ISBN)":
     if col_btn.button("🔍 Cerca Dati"):
         if isbn_inserito:
             with st.spinner("Ricerca nei database in corso..."):
-                dati = cerca_libro(isbn_inserito)
+                dati, motivo = cerca_libro(isbn_inserito)
                 if dati:
                     st.session_state.titolo_temp = dati["titolo"]
                     st.session_state.autore_temp = dati["autore"]
@@ -152,6 +221,8 @@ if menu == "📖 Catalogo Libri (ISBN)":
                 else:
                     st.session_state.isbn_temp = pulisci_isbn(isbn_inserito)
                     st.warning("Nessun dato trovato online. Puoi compilare i campi a mano.")
+                    with st.expander("Dettagli tecnici"):
+                        st.write(motivo)
         else:
             st.error("Inserisci prima un codice ISBN.")
 
@@ -163,11 +234,14 @@ if menu == "📖 Catalogo Libri (ISBN)":
         autore_finale = st.text_input("Autore:", value=st.session_state.autore_temp)
         editore_finale = st.text_input("Editore:", value=st.session_state.editore_temp)
         copertina_url = st.text_input("URL Copertina:", value=st.session_state.cover_temp)
+        file_cover = st.file_uploader("...oppure carica la copertina (foto o immagine)", type=["jpg", "jpeg", "png", "webp"])
+        if file_cover:
+            copertina_url = immagine_a_data_uri(file_cover)
         copie = st.number_input("Quantità copie:", min_value=1, value=1, step=1)
 
     with col_anteprima:
-        if st.session_state.cover_temp:
-            st.image(st.session_state.cover_temp, caption="Anteprima Copertina", width=140)
+        if copertina_url:
+            mostra_cover(copertina_url, caption="Anteprima Copertina", width=140)
         else:
             st.info("Nessuna copertina")
 
@@ -246,7 +320,7 @@ elif menu == "📋 Registra Prestito":
         with col2:
             copertina_sel = diz_libri[libro_sel][1]
             if copertina_sel:
-                st.image(copertina_sel, width=130, caption="Libro selezionato")
+                mostra_cover(copertina_sel, width=130, caption="Libro selezionato")
 
         if st.button("Conferma Prestito", type="primary"):
             id_utente = diz_utenti[utente_sel]
@@ -281,7 +355,7 @@ elif menu == "🔄 Rientro Prestito":
 
         id_prestito, isbn_libro, cover = prestiti_attivi[selezione]
         if cover:
-            st.image(cover, width=120)
+            mostra_cover(cover, width=120)
 
         if st.button("Segna come Restituito", type="primary"):
             oggi = str(date.today())
