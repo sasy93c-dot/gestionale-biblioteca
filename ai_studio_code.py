@@ -20,22 +20,15 @@ def isbn10_a_13(i):
     return base + str(ctrl)
 
 def cerca_google(isbn):
-    p = {"q": f"isbn:{isbn}"}
+    # Aggiungi 'country': 'IT' (o un altro paese) per evitare errori di localizzazione
+    p = {"q": f"isbn:{isbn}", "country": "IT"}
     if "GOOGLE_BOOKS_KEY" in st.secrets:
         p["key"] = st.secrets["GOOGLE_BOOKS_KEY"]
     r = requests.get("https://www.googleapis.com/books/v1/volumes", params=p, timeout=10)
     items = r.json().get("items") if r.ok else None
     if not items: 
         return None
-    v = items[0]["volumeInfo"]
-    cover = (v.get("imageLinks") or {}).get("thumbnail", "").replace("http://", "https://")
-    return {
-        "titolo": v.get("title", ""), 
-        "autore": ", ".join(v.get("authors", [])),
-        "editore": v.get("publisher", ""), 
-        "copertina": cover
-    }
-
+    # ... il resto del codice rimane invariato
 def cerca_openlibrary(isbn):
     r = requests.get("https://openlibrary.org/api/books",
         params={"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"}, timeout=10)
