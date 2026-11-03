@@ -134,79 +134,77 @@ elif menu == "🔄 Rientro Prestito":
 # -------------------------------------------------------------
 # 3. CATALOGO LIBRI (CON ISBN LOOKUP)
 # -------------------------------------------------------------
+# -------------------------------------------------------------
+# 3. CATALOGO LIBRI (CORRETTO E MIGLIORATO)
+# -------------------------------------------------------------
 elif menu == "📖 Catalogo Libri (ISBN)":
-    st.subheader("Aggiungi Nuovo Libro")
-    
-    isbn_input = st.text_input("Inserisci o scansiona ISBN:")
-    
-    titolo_default, autore_default = "", ""
-    if isbn_input:
-        t, a = get_book_by_isbn(isbn_input.replace("-", "").strip())
-        if t:
-            titolo_default, autore_default = t, a
-            st.success(f"Dati trovati: {t} di {a}")
+    st.subheader("Aggiungi Libro al Catalogo")
+
+    # Inizializza variabili di stato per i campi se non esistono
+    if "titolo_val" not in st.session_state:
+        st.session_state.titolo_val = ""
+    if "autore_val" not in st.session_state:
+        st.session_state.autore_val = ""
+
+    col_isbn, col_btn = st.columns([3, 1])
+    isbn_input = col_isbn.text_input("Codice ISBN (es. 9788804668237)", key="isbn_field").strip().replace("-", "")
+
+    # Tasto per cercare tramite ISBN
+    if col_btn.button("🔍 Cerca Dati"):
+        if isbn_input:
+            t, a = get_book_by_isbn(isbn_input)
+            if t:
+                st.session_state.titolo_val = t
+                st.session_state.autore_val = a
+                st.success(f"Trovato: {t}")
+            else:
+                st.warning("ISBN non trovato online. Puoi compilare a mano qui sotto.")
         else:
-            st.info("ISBN non trovato automaticamente. Inserisci i dati manualmente.")
-            
-    with st.form("libro_form"):
-        titolo = st.text_input("Titolo", value=titolo_default)
-        autore = st.text_input("Autore", value=autore_default)
-        copie = st.number_input("Quantità copie", min_value=1, value=1)
-        
-        btn_libro = st.form_submit_button("Salva nel Catalogo")
-        if btn_libro and isbn_input:
-            c.execute("""INSERT INTO libri (isbn, titolo, autore, copie_totali, copie_disponibili)
-                         VALUES (?, ?, ?, ?, ?)
-                         ON CONFLICT(isbn) DO UPDATE SET 
-                         copie_totali = copie_totali + excluded.copie_totali,
-                         copie_disponibili = copie_disponibili + excluded.copie_disponibili""",
-                      (isbn_input.strip(), titolo, autore, copie, copie))
-            conn.commit()
-            st.success(f"Libro '{titolo}' aggiunto!")
-            st.rerun()
-            
+            st.error("Inserisci prima un codice ISBN.")
+
+    # Campi compilabili (sia da ricerca ISBN che manualmente)
+    titolo = st.text_input("Titolo del libro", value=st.session_state.titolo_val)
+    autore = st.text_input("Autore", value=st.session_state.autore_val)
+    copie = st.number_input("Quantità copie", min_value=1, value=1, step=1)
+
+    # Tasto definitivo di Salvataggio
+    if st.button("💾 Salva nel Catalogo", type="primary"):
+        if not isbn_input:
+            st.error("Attenzione: il campo ISBN è obbligatorio (se il libro non ce l'ha, inventa un codice univoco, es. LIB001).")
+        elif not titolo:
+            st.error("Attenzione: il Titolo è obbligatorio.")
+        else:
+            try:
+                # Controlla se il libro esiste già
+                esistente = c.execute("SELECT copie_totali, copie_disponibili FROM libri WHERE isbn = ?", (isbn_input,)).fetchone()
+                
+                if esistente:
+                    nuove_tot = esistente[0] + copie
+                    nuove_disp = esistente[1] + copie
+                    c.execute("UPDATE libri SET copie_totali = ?, copie_disponibili = ?, titolo = ?, autore = ? WHERE isbn = ?",
+                              (nuove_tot, nuove_disp, titolo, autore, isbn_input))
+                else:
+                    c.execute("INSERT INTO libri (isbn, titolo, autore, copie_totali, copie_disponibili) VALUES (?, ?, ?, ?, ?)",
+                              (isbn_input, titolo, autore, copie, copie))
+                
+                conn.commit()
+                st.success(f"Libro '{titolo}' salvato con successo!")
+                
+                # Reset campi
+                st.session_state.titolo_val = ""
+                st.session_state.autore_val = ""
+                st.rerun()
+            except Exception as e:
+                st.error(f"Errore nel salvataggio: {e}")
+
     st.divider()
     st.subheader("Catalogo Attuale")
-    libri_df = c.execute("SELECT isbn, titolo, autore, copie_disponibili, copie_totali FROM libri").fetchall()
-    st.dataframe(libri_df, use_container_width=True)
-
-# -------------------------------------------------------------
-# 4. ANAGRAFICA UTENTI
-# -------------------------------------------------------------
-elif menu == "👥 Anagrafica Utenti":
-    st.subheader("Aggiungi Nuovo Utente")
-    with st.form("utente_form"):
-        col1, col2 = st.columns(2)
-        nome = col1.text_input("Nome")
-        cognome = col2.text_input("Cognome")
-        email = col1.text_input("Email")
-        tel = col2.text_input("Telefono")
-        
-        btn_user = st.form_submit_button("Registra Utente")
-        if btn_user and nome and cognome:
-            c.execute("INSERT INTO utenti (nome, cognome, email, telefono) VALUES (?, ?, ?, ?)",
-                      (nome, cognome, email, tel))
-            conn.commit()
-            st.success(f"Utente {nome} {cognome} registrato!")
-            st.rerun()
-
-    st.divider()
-    st.subheader("Lista Utenti")
-    utenti_df = c.execute("SELECT id, nome, cognome, email, telefono FROM utenti").fetchall()
-    st.dataframe(utenti_df, use_container_width=True)
-
-# -------------------------------------------------------------
-# 5. STORICO PRESTITI
-# -------------------------------------------------------------
-elif menu == "📊 Storico Prestiti":
-    st.subheader("Monitoraggio Prestiti Totali")
-    query = '''SELECT p.id, l.titolo, p.isbn, u.nome || ' ' || u.cognome as utente, 
-                      p.data_prestito, p.data_restituzione, p.stato 
-               FROM prestiti p
-               JOIN libri l ON p.isbn = l.isbn
-               JOIN utenti u ON p.utente_id = u.id
-               ORDER BY p.id DESC'''
-    prestiti_df = c.execute(query).fetchall()
-    st.dataframe(prestiti_df, use_container_width=True)
-
-conn.close()
+    
+    # Mostra catalogo aggiornato
+    libri_raw = c.execute("SELECT isbn, titolo, autore, copie_disponibili, copie_totali FROM libri").fetchall()
+    if libri_raw:
+        import pandas as pd
+        df = pd.DataFrame(libri_raw, columns=["ISBN", "Titolo", "Autore", "Copie Disp.", "Copie Totali"])
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Nessun libro presente nel catalogo.")
