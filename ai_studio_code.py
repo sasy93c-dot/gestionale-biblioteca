@@ -37,38 +37,46 @@ def init_db():
 init_db()
 
 # --- FUNZIONE RECUPERO INFO DA ISBN (Google Books API) ---
+# --- FUNZIONE RECUPERO INFO DA ISBN (OpenLibrary + Google Books) ---
 def get_book_by_isbn(isbn):
+    # Pulisce l'ISBN da trattini, spazi o caratteri strani
+    isbn_clean = isbn.strip().replace("-", "").replace(" ", "").upper()
+    if not isbn_clean:
+        return None, None
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+    # TENTATIVO 1: Open Library (eccellente per server cloud, nessun blocco)
     try:
-        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
-        res = requests.get(url).json()
-        if "items" in res:
-            info = res["items"][0]["volumeInfo"]
-            titolo = info.get("title", "")
-            autori = ", ".join(info.get("authors", ["Sconosciuto"]))
-            return titolo, autori
+        url_ol = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn_clean}&format=json&jscmd=data"
+        res_ol = requests.get(url_ol, headers=headers, timeout=6)
+        if res_ol.status_code == 200:
+            data = res_ol.json()
+            key = f"ISBN:{isbn_clean}"
+            if key in data:
+                titolo = data[key].get("title", "")
+                autori = ", ".join([a.get("name") for a in data[key].get("authors", [])]) or "Sconosciuto"
+                return titolo, autori
     except Exception:
         pass
+
+    # TENTATIVO 2: Google Books API (con User-Agent per non essere bloccati)
+    try:
+        url_gb = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn_clean}"
+        res_gb = requests.get(url_gb, headers=headers, timeout=6)
+        if res_gb.status_code == 200:
+            data = res_gb.json()
+            if "items" in data and len(data["items"]) > 0:
+                info = data["items"][0]["volumeInfo"]
+                titolo = info.get("title", "")
+                autori = ", ".join(info.get("authors", ["Sconosciuto"]))
+                return titolo, autori
+    except Exception:
+        pass
+
     return None, None
-
-# --- CONNESSIONE DB ---
-def get_connection():
-    return sqlite3.connect('biblioteca.db')
-
-# --- INTERFACCIA STREAMLIT ---
-st.set_page_config(page_title="Gestionale Biblioteca", layout="wide")
-st.title("📚 Banco Biblioteca - Gestione Prestiti")
-
-menu = st.sidebar.radio("Navigazione", [
-    "📋 Registra Prestito", 
-    "🔄 Rientro Prestito", 
-    "📖 Catalogo Libri (ISBN)", 
-    "👥 Anagrafica Utenti", 
-    "📊 Storico Prestiti"
-])
-
-conn = get_connection()
-c = conn.cursor()
-
 # -------------------------------------------------------------
 # 1. REGISTRA PRESTITO
 # -------------------------------------------------------------
