@@ -38,7 +38,7 @@ def cover_valida(url):
 def _google(q, isbn):
     p = {"q": q, "maxResults": 5, "country": "IT"}
     if "GOOGLE_BOOKS_KEY" in st.secrets:
-        p["key"] = st.secrets["GOOGLE_BOOKS_KEY"]
+        p["key"] = st.secrets["AIzaSyAXp61M1AGtnFnEByUKAzl87lAWgXZTjdQ"]
     items = _get("https://www.googleapis.com/books/v1/volumes", p).get("items") or []
     scelto = None
     for it in items:
