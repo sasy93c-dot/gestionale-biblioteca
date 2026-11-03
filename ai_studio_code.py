@@ -1,6 +1,4 @@
 import re
-import io
-import base64
 import requests
 import sqlite3
 import pandas as pd
@@ -10,7 +8,7 @@ from datetime import date
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(page_title="Gestionale Biblioteca", layout="wide", page_icon="📚")
 
-# --- MOTORE DI RICERCA ISBN (OTTIMIZZATO) ---
+# --- MOTORE DI RICERCA ISBN ---
 def pulisci_isbn(s):
     return re.sub(r"[^0-9Xx]", "", s or "").upper()
 
@@ -21,112 +19,58 @@ def isbn10_a_13(i):
     ctrl = (10 - sum(int(c) * (1 if n % 2 == 0 else 3) for n, c in enumerate(base)) % 10) % 10
     return base + str(ctrl)
 
-HEADERS = {"User-Agent": "GestionaleBiblioteca/1.0 (streamlit)"}
-
-def _get(url, params=None):
-    r = requests.get(url, params=params, headers=HEADERS, timeout=12)
-    r.raise_for_status()
-    return r.json()
-
-def cover_valida(url):
-    try:
-        r = requests.head(url, headers=HEADERS, timeout=8, allow_redirects=True)
-        return r.ok and "image" in r.headers.get("content-type", "")
-    except Exception:
-        return False
-
-def _google(q, isbn):
-    p = {"q": q, "maxResults": 5, "country": "IT"}
+def cerca_google(isbn):
+    p = {"q": f"isbn:{isbn}"}
     if "GOOGLE_BOOKS_KEY" in st.secrets:
         p["key"] = st.secrets["GOOGLE_BOOKS_KEY"]
-    items = _get("https://www.googleapis.com/books/v1/volumes", p).get("items") or []
-    scelto = None
-    for it in items:
-        ids = [x.get("identifier", "") for x in it["volumeInfo"].get("industryIdentifiers", [])]
-        if isbn in ids:
-            scelto = it
-            break
-    if not scelto and items and q.startswith("isbn:"):
-        scelto = items[0]
-    if not scelto:
+    r = requests.get("https://www.googleapis.com/books/v1/volumes", params=p, timeout=10)
+    items = r.json().get("items") if r.ok else None
+    if not items: 
         return None
-    v = scelto["volumeInfo"]
-    cover = (v.get("imageLinks") or {}).get("thumbnail", "").replace("http://", "https://").replace("&edge=curl", "")
-    return {"titolo": v.get("title", ""), "autore": ", ".join(v.get("authors", [])),
-            "editore": v.get("publisher", ""), "copertina": cover}
-def google_isbn(isbn):
-    return _google(f"isbn:{isbn}", isbn)
+    v = items[0]["volumeInfo"]
+    cover = (v.get("imageLinks") or {}).get("thumbnail", "").replace("http://", "https://")
+    return {
+        "titolo": v.get("title", ""), 
+        "autore": ", ".join(v.get("authors", [])),
+        "editore": v.get("publisher", ""), 
+        "copertina": cover
+    }
 
-def google_testo(isbn):
-    return _google(isbn, isbn)
-
-def openlibrary(isbn):
-    d = _get("https://openlibrary.org/api/books",
-             {"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"}).get(f"ISBN:{isbn}")
-    if not d:
+def cerca_openlibrary(isbn):
+    r = requests.get("https://openlibrary.org/api/books",
+        params={"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"}, timeout=10)
+    d = r.json().get(f"ISBN:{isbn}") if r.ok else None
+    if not d: 
         return None
-    return {"titolo": d.get("title", ""),
-            "autore": ", ".join(a["name"] for a in d.get("authors", [])),
-            "editore": ", ".join(p["name"] for p in d.get("publishers", [])),
-            "copertina": (d.get("cover") or {}).get("medium", "")}
+    return {
+        "titolo": d.get("title", ""),
+        "autore": ", ".join(a["name"] for a in d.get("authors", [])),
+        "editore": ", ".join(p["name"] for p in d.get("publishers", [])),
+        "copertina": (d.get("cover") or {}).get("medium", "")
+    }
 
-FONTI = (google_isbn, google_testo, openlibrary)
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _cerca_online(isbn):
-    # Se non trova nulla solleva un errore: cosi' l'esito negativo NON viene messo in cache.
-    errori = []
-    for fonte in FONTI:
-        try:
-            ris = fonte(isbn)
-            if ris and ris["titolo"]:
-                if not ris["copertina"]:
-                    alt = f"https://covers.openlibrary.org/b/isbn/{isbn}-M.jpg?default=false"
-                    ris["copertina"] = alt if cover_valida(alt) else ""
-                return ris
-            errori.append(f"{fonte.__name__}: nessun risultato")
-        except Exception as e:
-            errori.append(f"{fonte.__name__}: {e}")
-    raise LookupError(" | ".join(errori))
-
+@st.cache_data(ttl=86400)
 def cerca_libro(isbn_grezzo):
-    """Ritorna (dati, motivo_errore)."""
     isbn = pulisci_isbn(isbn_grezzo)
     if not isbn:
-        return None, "ISBN vuoto"
-    motivo = ""
+        return None
     for codice in dict.fromkeys([isbn, isbn10_a_13(isbn)]):
-        try:
-            ris = dict(_cerca_online(codice))
-            ris["isbn"] = codice
-            return ris, ""
-        except LookupError as e:
-            motivo = str(e)
-    return None, motivo
-
-# --- COPERTINE ---
-def immagine_a_data_uri(file):
-    from PIL import Image
-    img = Image.open(file).convert("RGB")
-    img.thumbnail((400, 600))
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=80)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-
-def mostra_cover(src, **kw):
-    try:
-        if src.startswith("data:image"):
-            st.image(base64.b64decode(src.split(",", 1)[1]), **kw)
-        else:
-            st.image(src, **kw)
-    except Exception:
-        st.caption("Copertina non disponibile")
+        for fonte in (cerca_google, cerca_openlibrary):
+            try:
+                ris = fonte(codice)
+                if ris and ris["titolo"]:
+                    if not ris["copertina"]:
+                        ris["copertina"] = f"https://covers.openlibrary.org/b/isbn/{codice}-M.jpg?default=false"
+                    ris["isbn"] = codice
+                    return ris
+            except Exception:
+                continue
+    return None
 
 # --- INIZIALIZZAZIONE DATABASE ---
 def init_db():
     conn = sqlite3.connect('biblioteca.db')
     c = conn.cursor()
-    # Tabella Libri
     c.execute('''CREATE TABLE IF NOT EXISTS libri (
                     isbn TEXT PRIMARY KEY,
                     titolo TEXT,
@@ -136,7 +80,6 @@ def init_db():
                     copie_disponibili INTEGER,
                     copertina_url TEXT)''')
 
-    # Migrazioni automatiche per colonne aggiuntive
     try:
         c.execute("ALTER TABLE libri ADD COLUMN copertina_url TEXT")
     except sqlite3.OperationalError:
@@ -146,14 +89,13 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
-    # Tabella Utenti
     c.execute('''CREATE TABLE IF NOT EXISTS utenti (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nome TEXT,
                     cognome TEXT,
                     email TEXT,
                     telefono TEXT)''')
-    # Tabella Prestiti
+
     c.execute('''CREATE TABLE IF NOT EXISTS prestiti (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     isbn TEXT,
@@ -182,103 +124,148 @@ menu = st.sidebar.radio("Sezioni:", [
     "📊 Storico Prestiti"
 ])
 
-try:
-    with open("biblioteca.db", "rb") as f:
-        st.sidebar.download_button("💾 Scarica backup database", f.read(), "biblioteca.db")
-except Exception:
-    pass
-
 conn = get_connection()
 c = conn.cursor()
 
 # -------------------------------------------------------------
-# 1. CATALOGO LIBRI (CON LOGICA OTTIMIZZATA)
+# 1. CATALOGO LIBRI (AGGIUNTA + MODIFICA QUANTITÀ)
 # -------------------------------------------------------------
 if menu == "📖 Catalogo Libri (ISBN)":
-    st.subheader("Aggiungi o Aggiorna Libro")
+    tab_nuovo, tab_modifica = st.tabs(["➕ Aggiungi Nuovo Libro", "✏️ Modifica Quantità / Rimuovi"])
 
-    # Inizializza session_state per i campi
-    for k in ["titolo_temp", "autore_temp", "editore_temp", "cover_temp", "isbn_temp"]:
-        if k not in st.session_state:
-            st.session_state[k] = ""
+    # --- TAB 1: INSERIMENTO NUOVO LIBRO ---
+    with tab_nuovo:
+        st.subheader("Carica Libro tramite ISBN o Manualmente")
 
-    col_isbn, col_btn = st.columns([3, 1])
-    isbn_inserito = col_isbn.text_input("Codice ISBN (10 o 13 cifre):", value=st.session_state.isbn_temp)
+        for k in ["titolo_temp", "autore_temp", "editore_temp", "cover_temp", "isbn_temp"]:
+            if k not in st.session_state:
+                st.session_state[k] = ""
 
-    if col_btn.button("🔍 Cerca Dati"):
-        if isbn_inserito:
-            with st.spinner("Ricerca nei database in corso..."):
-                dati, motivo = cerca_libro(isbn_inserito)
-                if dati:
-                    st.session_state.titolo_temp = dati["titolo"]
-                    st.session_state.autore_temp = dati["autore"]
-                    st.session_state.editore_temp = dati["editore"]
-                    st.session_state.cover_temp = dati["copertina"]
-                    st.session_state.isbn_temp = dati["isbn"]
-                    st.success(f"Trovato: {dati['titolo']}")
+        col_isbn, col_btn = st.columns([3, 1])
+        isbn_inserito = col_isbn.text_input("Codice ISBN (10 o 13 cifre):", value=st.session_state.isbn_temp)
+
+        if col_btn.button("🔍 Cerca Dati Online"):
+            if isbn_inserito:
+                with st.spinner("Ricerca in corso..."):
+                    dati = cerca_libro(isbn_inserito)
+                    if dati:
+                        st.session_state.titolo_temp = dati["titolo"]
+                        st.session_state.autore_temp = dati["autore"]
+                        st.session_state.editore_temp = dati["editore"]
+                        st.session_state.cover_temp = dati["copertina"]
+                        st.session_state.isbn_temp = dati["isbn"]
+                        st.success(f"Trovato: {dati['titolo']}")
+                        st.rerun()
+                    else:
+                        st.session_state.isbn_temp = pulisci_isbn(isbn_inserito)
+                        st.warning("Dati non trovati online. Puoi inserirli manualmente.")
+            else:
+                st.error("Inserisci prima un codice ISBN.")
+
+        col_dati, col_anteprima = st.columns([3, 1])
+        with col_dati:
+            titolo_finale = st.text_input("Titolo:", value=st.session_state.titolo_temp)
+            autore_finale = st.text_input("Autore:", value=st.session_state.autore_temp)
+            editore_finale = st.text_input("Editore:", value=st.session_state.editore_temp)
+            copertina_url = st.text_input("URL Copertina:", value=st.session_state.cover_temp)
+            copie = st.number_input("Quantità copie da aggiungere:", min_value=1, value=1, step=1)
+
+        with col_anteprima:
+            if st.session_state.cover_temp:
+                st.image(st.session_state.cover_temp, caption="Anteprima", width=140)
+            else:
+                st.info("Nessuna copertina")
+
+        if st.button("💾 Salva nel Catalogo", type="primary"):
+            isbn_finale = pulisci_isbn(isbn_inserito)
+            if not isbn_finale:
+                st.error("L'ISBN è obbligatorio.")
+            elif not titolo_finale.strip():
+                st.error("Il Titolo è obbligatorio.")
+            else:
+                try:
+                    c.execute("SELECT copie_totali, copie_disponibili FROM libri WHERE isbn = ?", (isbn_finale,))
+                    esiste = c.fetchone()
+
+                    if esiste:
+                        c.execute("""UPDATE libri 
+                                     SET copie_totali = copie_totali + ?, 
+                                         copie_disponibili = copie_disponibili + ?, 
+                                         titolo = ?, autore = ?, editore = ?, copertina_url = ? 
+                                     WHERE isbn = ?""",
+                                  (copie, copie, titolo_finale.strip(), autore_finale.strip(), editore_finale.strip(), copertina_url, isbn_finale))
+                        st.success(f"Aggiunte {copie} copie al libro '{titolo_finale}'.")
+                    else:
+                        c.execute("""INSERT INTO libri (isbn, titolo, autore, editore, copie_totali, copie_disponibili, copertina_url) 
+                                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                                  (isbn_finale, titolo_finale.strip(), autore_finale.strip(), editore_finale.strip(), copie, copie, copertina_url))
+                        st.success(f"Libro '{titolo_finale}' inserito a catalogo!")
+
+                    conn.commit()
+                    for k in ["titolo_temp", "autore_temp", "editore_temp", "cover_temp", "isbn_temp"]:
+                        st.session_state[k] = ""
                     st.rerun()
-                else:
-                    st.session_state.isbn_temp = pulisci_isbn(isbn_inserito)
-                    st.warning("Nessun dato trovato online. Puoi compilare i campi a mano.")
-                    with st.expander("Dettagli tecnici"):
-                        st.write(motivo)
+                except Exception as e:
+                    st.error(f"Errore durante il salvataggio: {e}")
+
+    # --- TAB 2: MODIFICA QUANTITÀ O ELIMINA ---
+    with tab_modifica:
+        st.subheader("Aggiorna Disponibilità o Rimuovi Libro")
+        libri_presenti = c.execute("SELECT isbn, titolo, autore, copie_totali, copie_disponibili, copertina_url FROM libri").fetchall()
+
+        if not libri_presenti:
+            st.info("Nessun libro presente da poter modificare.")
         else:
-            st.error("Inserisci prima un codice ISBN.")
+            diz_mod = {f"{l[1]} ({l[2]}) - ISBN: {l[0]}": l for l in libri_presenti}
+            libro_selezionato = st.selectbox("Seleziona il libro da modificare:", list(diz_mod.keys()))
+            dati_sel = diz_mod[libro_selezionato]
 
-    # Form dati e anteprima copertina
-    col_dati, col_anteprima = st.columns([3, 1])
+            isbn_sel = dati_sel[0]
+            tit_sel = dati_sel[1]
+            totali_attuali = dati_sel[3]
+            disp_attuali = dati_sel[4]
+            in_prestito = totali_attuali - disp_attuali
+            cover_sel = dati_sel[5]
 
-    with col_dati:
-        titolo_finale = st.text_input("Titolo:", value=st.session_state.titolo_temp)
-        autore_finale = st.text_input("Autore:", value=st.session_state.autore_temp)
-        editore_finale = st.text_input("Editore:", value=st.session_state.editore_temp)
-        copertina_url = st.text_input("URL Copertina:", value=st.session_state.cover_temp)
-        file_cover = st.file_uploader("...oppure carica la copertina (foto o immagine)", type=["jpg", "jpeg", "png", "webp"])
-        if file_cover:
-            copertina_url = immagine_a_data_uri(file_cover)
-        copie = st.number_input("Quantità copie:", min_value=1, value=1, step=1)
+            c_mod1, c_mod2 = st.columns([3, 1])
+            with c_mod1:
+                st.write(f"📌 **Riepilogo Attuale:**")
+                st.write(f"- Copie Totali Possedute: **{totali_attuali}**")
+                st.write(f"- Copie attualmente in Prestito ad utenti: **{in_prestito}**")
+                st.write(f"- Copie Fisicamente Disponibili al banco: **{disp_attuali}**")
 
-    with col_anteprima:
-        if copertina_url:
-            mostra_cover(copertina_url, caption="Anteprima Copertina", width=140)
-        else:
-            st.info("Nessuna copertina")
+                nuovo_totale = st.number_input(
+                    "Imposta Nuovo Totale Copie Possedute:",
+                    min_value=in_prestito,
+                    value=totali_attuali,
+                    step=1,
+                    help=f"Non puoi scendere sotto {in_prestito} perché quelle copie sono attualmente fuori in prestito."
+                )
 
-    if st.button("💾 Salva nel Catalogo", type="primary"):
-        isbn_finale = pulisci_isbn(isbn_inserito)
-        if not isbn_finale:
-            st.error("L'ISBN è obbligatorio.")
-        elif not titolo_finale.strip():
-            st.error("Il Titolo è obbligatorio.")
-        else:
-            try:
-                c.execute("SELECT copie_totali, copie_disponibili FROM libri WHERE isbn = ?", (isbn_finale,))
-                esiste = c.fetchone()
+            with c_mod2:
+                if cover_sel:
+                    st.image(cover_sel, width=120)
 
-                if esiste:
-                    c.execute("""UPDATE libri 
-                                 SET copie_totali = copie_totali + ?, 
-                                     copie_disponibili = copie_disponibili + ?, 
-                                     titolo = ?, autore = ?, editore = ?, copertina_url = ? 
-                                 WHERE isbn = ?""",
-                              (copie, copie, titolo_finale.strip(), autore_finale.strip(), editore_finale.strip(), copertina_url, isbn_finale))
-                    st.success(f"Aggiunte {copie} copie al libro '{titolo_finale}'.")
-                else:
-                    c.execute("""INSERT INTO libri (isbn, titolo, autore, editore, copie_totali, copie_disponibili, copertina_url) 
-                                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                              (isbn_finale, titolo_finale.strip(), autore_finale.strip(), editore_finale.strip(), copie, copie, copertina_url))
-                    st.success(f"Libro '{titolo_finale}' inserito a catalogo!")
-
+            col_aggiorna, col_cancella = st.columns([2, 1])
+            if col_aggiorna.button("💾 Applica Nuova Quantità", type="primary"):
+                nuove_disp = nuovo_totale - in_prestito
+                c.execute("UPDATE libri SET copie_totali = ?, copie_disponibili = ? WHERE isbn = ?",
+                          (nuovo_totale, nuove_disp, isbn_sel))
                 conn.commit()
-                # Reset campi
-                for k in ["titolo_temp", "autore_temp", "editore_temp", "cover_temp", "isbn_temp"]:
-                    st.session_state[k] = ""
+                st.success(f"Copie aggiornate con successo! Nuove disponibili: {nuove_disp}")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Errore durante il salvataggio: {e}")
+
+            if col_cancella.button("🗑️ Rimuovi Libro dal Catalogo"):
+                if in_prestito > 0:
+                    st.error(f"Impossibile eliminare: ci sono {in_prestito} copie attualmente in prestito!")
+                else:
+                    c.execute("DELETE FROM libri WHERE isbn = ?", (isbn_sel,))
+                    conn.commit()
+                    st.success(f"'{tit_sel}' è stato rimosso dal catalogo.")
+                    st.rerun()
 
     st.divider()
-    st.subheader("Catalogo Attuale")
+    st.subheader("📚 Catalogo Libri Completo")
     catalogo = c.execute("SELECT copertina_url, isbn, titolo, autore, editore, copie_disponibili, copie_totali FROM libri").fetchall()
     if catalogo:
         df = pd.DataFrame(catalogo, columns=["Copertina", "ISBN", "Titolo", "Autore", "Editore", "Disp.", "Totali"])
@@ -319,7 +306,7 @@ elif menu == "📋 Registra Prestito":
         with col2:
             copertina_sel = diz_libri[libro_sel][1]
             if copertina_sel:
-                mostra_cover(copertina_sel, width=130, caption="Libro selezionato")
+                st.image(copertina_sel, width=130, caption="Libro selezionato")
 
         if st.button("Conferma Prestito", type="primary"):
             id_utente = diz_utenti[utente_sel]
@@ -354,7 +341,7 @@ elif menu == "🔄 Rientro Prestito":
 
         id_prestito, isbn_libro, cover = prestiti_attivi[selezione]
         if cover:
-            mostra_cover(cover, width=120)
+            st.image(cover, width=120)
 
         if st.button("Segna come Restituito", type="primary"):
             oggi = str(date.today())
